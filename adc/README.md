@@ -536,3 +536,219 @@ MODULE_AUTHOR("SakoroYou");
 MODULE_DESCRIPTION("YOU IMX6ULL ADC Driver");
 MODULE_LICENSE("GPL v2");
 ```
+
+## 中断（和其中的completion）
+
+IRQ 不保存在结构体中是因为：
+
+- 使用模式：一次注册，自动处理，无需后续操作
+- 资源管理：devm_request_irq() 自动管理生命周期
+- 设计原则：只保存需要反复使用的资源
+
+```c
+    irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
+		dev_err(&pdev->dev, "no irq resource?\n");
+		return irq;
+	}
+
+	ret = devm_request_irq(info->dev, irq,
+				imx6ull_adc_isr, 0,
+				dev_name(&pdev->dev), info);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "failed requesting irq, irq = %d\n", irq);
+		return ret;
+	}
+```
+
+imx6ull_adc_isr里处理adc转换完成中断
+
+```c
+static irqreturn_t vf610_adc_isr(int irq, void *dev_id)
+{
+    struct vf610_adc *info = (struct vf610_adc *)dev_id;
+    int coco;
+
+    coco = readl(info->regs + VF610_REG_ADC_HS);
+    if (coco & VF610_ADC_HS_COCO0) {
+        info->value = vf610_adc_read_data(info);
+        complete(&info->completion);
+    }
+
+    return IRQ_HANDLED;
+}
+```
+
+### 1. **检查中断状态**
+````c
+coco = readl(info->regs + VF610_REG_ADC_HS);
+````
+- 读取 ADC 硬件状态寄存器 (`VF610_REG_ADC_HS`)
+- `coco` 代表 "Conversion Complete" 状态
+
+readl 需要 #include <linux/io.h>
+
+### 2. **验证中断源**
+````c
+if (coco & VF610_ADC_HS_COCO0) {
+````
+- 检查是否是通道 0 的转换完成中断
+- `VF610_ADC_HS_COCO0` 是转换完成标志位
+
+// 转换完成时:
+coco = 0x00000001;  // COCO0 = 1
+coco & 0x00000001 = 0x00000001;  // 非零 → 条件为真
+
+// 转换未完成时:
+coco = 0x00000000;  // COCO0 = 0  
+coco & 0x00000001 = 0x00000000;  // 零 → 条件为假
+
+### 3. **读取转换结果**
+````c
+info->value = vf610_adc_read_data(info);
+````
+- 调用 `vf610_adc_read_data()` 读取 ADC 转换结果
+- 将结果保存到 `info->value` 中
+
+### 4. **通知等待任务**
+````c
+complete(&info->completion);
+````
+- 通过 `completion` 机制通知等待中的任务
+- 唤醒在 `wait_for_completion_*()` 中等待的代码
+
+completion 是 Linux 内核提供的一种同步原语，专门用于一个线程等待另一个线程完成某项工作的场景，需要 #include <linux/completion.h>
+
+```c
+struct vf610_adc {
+    // ...
+    struct completion completion;  // 定义 completion 对象
+};
+
+// 初始化
+init_completion(&info->completion);
+
+// 重新初始化（清除之前的完成状态）
+reinit_completion(&info->completion);
+
+// 等待完成（带超时和可中断）
+ret = wait_for_completion_interruptible_timeout(&info->completion, VF610_ADC_TIMEOUT);
+
+// 通知完成
+complete(&info->completion);
+```
+
+````c
+static int vf610_adc_read_data(struct vf610_adc *info)
+{
+	int result;
+
+	result = readl(info->regs + VF610_REG_ADC_R0);
+
+	switch (info->adc_feature.res_mode) {
+	case 8:
+		result &= 0xFF;
+		break;
+	case 10:
+		result &= 0x3FF;
+		break;
+	case 12:
+		result &= 0xFFF;
+		break;
+	default:
+		break;
+	}
+
+	return result;
+}
+````
+
+### 1. **读取原始数据**
+
+````c
+result = readl(info->regs + VF610_REG_ADC_R0);
+````
+- 从 ADC 结果寄存器 `VF610_REG_ADC_R0`（偏移 0x0c）读取 32 位数据
+- 这个寄存器包含最新的 ADC 转换结果
+
+### 2. **数据格式化**
+
+根据当前设置的分辨率模式，屏蔽掉高位无效数据：
+
+````c
+switch (info->adc_feature.res_mode) {
+case 8:
+    result &= 0xFF;      // 保留低 8 位，范围 0-255
+    break;
+case 10:
+    result &= 0x3FF;     // 保留低 10 位，范围 0-1023
+    break;
+case 12:
+    result &= 0xFFF;     // 保留低 12 位，范围 0-4095
+    break;
+}
+````
+
+```c
+// 原始值
+result = 0x12345678;  // 二进制：00010010001101000101011001111000
+
+// 8位模式
+result &= 0xFF;       // 结果：0x78 = 120
+// 计算过程：
+// 0x12345678 & 0x000000FF = 0x00000078
+
+// 10位模式  
+result &= 0x3FF;      // 结果：0x278 = 632
+// 计算过程：
+// 0x12345678 & 0x000003FF = 0x00000278
+
+// 12位模式
+result &= 0xFFF;      // 结果：0x678 = 1656
+// 计算过程：
+// 0x12345678 & 0x00000FFF = 0x00000678
+```
+
+result返回数据用于电压计算：
+
+```c
+// 在 vf610_read_raw 中
+case IIO_CHAN_INFO_SCALE:
+    *val = info->vref_uv / 1000;           // 参考电压（mV）
+    *val2 = info->adc_feature.res_mode;    // 分辨率位数
+    return IIO_VAL_FRACTIONAL_LOG2;
+
+// 用户空间计算实际电压：
+// 实际电压 = (ADC值 / 2^分辨率) * 参考电压
+// 例如：12位模式，参考电压3.3V，ADC值2048
+// 实际电压 = (2048 / 4096) * 3.3V = 1.65V
+```
+
+`vf610_adc_read_data` 函数的作用是：
+
+1. **读取硬件寄存器**：从 ADC_R0 获取原始转换结果
+2. **数据清理**：根据分辨率模式屏蔽无效位
+3. **范围控制**：确保数据在有效范围内
+4. **提供标准接口**：为上层提供格式化的 ADC 数据
+
+## 内存映射
+
+```c
+    mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+    info->regs = devm_ioremap_resource(&pdev->dev, mem);
+    if (IS_ERR(info->regs))
+		return PTR_ERR(info->regs);
+```
+
+手册不会明显提到内存映射，因为这是软件实现细节
+
+- 手册关注的是硬件功能：中断、时钟、ADC 转换
+- 内存映射是 Linux 驱动访问硬件的标准方法
+
+物理地址: 0x4003b000 (设备树中定义)
+    ↓ ioremap_resource()
+虚拟地址: info->regs (驱动中使用)
+
+访问示例:
+- ADC_CFG 寄存器: info->regs + 0x14
+- ADC_R0 寄存器:  info->regs + 0x0c
