@@ -25,6 +25,7 @@
         "jiffies.h": "c",
         "delay.h": "c",
         "platform_device.h": "c",
-        "interrupt.h": "c"
+        "interrupt.h": "c",
+        "completion.h": "c"
     },
 }
