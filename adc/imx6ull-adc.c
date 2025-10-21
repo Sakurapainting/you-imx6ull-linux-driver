@@ -10,17 +10,14 @@
 
 /* IMX ADC registers */
 #define IMX6ULL_REG_ADC_HC0		0x00
-#define IMX6ULL_REG_ADC_HC1		0x04
 #define IMX6ULL_REG_ADC_HS		0x08
 #define IMX6ULL_REG_ADC_R0		0x0c
-#define IMX6ULL_REG_ADC_R1		0x10
 #define IMX6ULL_REG_ADC_CFG		0x14
 #define IMX6ULL_REG_ADC_GC		0x18
 #define IMX6ULL_REG_ADC_GS		0x1c
 #define IMX6ULL_REG_ADC_CV		0x20
 #define IMX6ULL_REG_ADC_OFS		0x24
 #define IMX6ULL_REG_ADC_CAL		0x28
-#define IMX6ULL_REG_ADC_PCTL	0x30
 
 /* Configuration register field define */
 #define IMX6ULL_ADC_MODE_BIT8		0x00
