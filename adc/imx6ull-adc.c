@@ -1,6 +1,9 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/kernel.h>
+#include <linux/io.h>
+#include <linux/interrupt.h>
+#include <linux/completion.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -112,9 +115,50 @@ static const struct iio_chan_spec imx6ull_adc_iio_channels[] = {
 
 struct imx6ull_adc {
 	struct device *dev;
+	void __iomem *regs;
 
+	u32 value;
+
+	struct imx6ull_adc_feature adc_feature;
+	struct completion completion;
 	struct mutex lock;
 };
+
+static int imx6ull_adc_read_data(struct imx6ull_adc *info)
+{
+	int result;
+
+	result = readl(info->regs + IMX6ULL_REG_ADC_R0);
+
+	switch (info->adc_feature.res_mode) {
+		case 8:
+			result &= 0xFF;
+			break;
+		case 10:
+			result &= 0x3FF;
+			break;
+		case 12:
+			result &= 0xFFF;
+			break;
+		default:
+			break;
+	}
+
+	return result;
+}
+
+static irqreturn_t imx6ull_adc_isr(int irq, void *dev_id) {
+	struct imx6ull_adc *info = (struct imx6ull_adc *)dev_id;
+	int coco;
+
+	coco = readl(info->regs + IMX6ULL_REG_ADC_HS);
+	if (coco & IMX6ULL_ADC_HS_COCO0) {
+		info->value = imx6ull_adc_read_data(info);
+		complete(&info->completion);
+	}
+
+	return IRQ_HANDLED;
+}
 
 static const struct iio_info imx6ull_adc_iio_info = {
 	.driver_module = THIS_MODULE,
@@ -131,6 +175,9 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
 	struct iio_dev *indio_dev;
 	int ret;
 
+	struct resource *mem;
+	int irq;
+
 	u32 channels;
 
 	indio_dev = devm_iio_device_alloc(&pdev->dev, sizeof(struct imx6ull_adc));
@@ -141,6 +188,27 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
 
 	info = iio_priv(indio_dev);
 	info->dev = &pdev->dev;
+
+	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	info->regs = devm_ioremap_resource(&pdev->dev, mem);
+	if (IS_ERR(info->regs))
+		return PTR_ERR(info->regs);
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
+		dev_err(&pdev->dev, "no irq resource?\n");
+		return irq;
+	}
+
+	ret = devm_request_irq(info->dev, irq,
+				imx6ull_adc_isr, 0,
+				dev_name(&pdev->dev), info);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "failed requesting irq, irq = %d\n", irq);
+		return ret;
+	}
+
+	init_completion(&info->completion);
 
 	platform_set_drvdata(pdev, indio_dev);
 
