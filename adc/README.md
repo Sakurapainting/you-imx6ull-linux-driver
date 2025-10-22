@@ -752,3 +752,52 @@ case IIO_CHAN_INFO_SCALE:
 访问示例:
 - ADC_CFG 寄存器: info->regs + 0x14
 - ADC_R0 寄存器:  info->regs + 0x0c
+
+## 时钟
+
+使用时钟函数需要包含头文件
+
+```c
+#include <linux/clk.h>
+```
+
+自定义结构体中 struct imx6ull_adc 加入
+
+```c
+struct clk *clk;
+```
+
+probe函数，devm_clk_get
+
+```c
+info->clk = devm_clk_get(&pdev->dev, "adc");
+	if (IS_ERR(info->clk)) {
+		dev_err(&pdev->dev, "failed getting clock, err = %ld\n",
+						PTR_ERR(info->clk));
+		return PTR_ERR(info->clk);
+	}
+```
+
+不在devm_clk_get之后紧跟开启时钟，而是确保所有依赖资源都获取成功后再开启。
+
+```c
+// 确保所有依赖资源都获取成功后再开启时钟
+info->vref = devm_regulator_get(&pdev->dev, "vref");
+ret = regulator_enable(info->vref);  // 电源就绪
+info->vref_uv = regulator_get_voltage(info->vref);  // 参考电压确定
+
+// IIO 设备配置完成
+indio_dev->name = dev_name(&pdev->dev);
+// ...
+
+// 现在开启时钟，所有依赖都已就绪
+ret = clk_prepare_enable(info->clk);
+```
+
+开启时钟后，就可以为硬件寄存器配置提供时钟。
+
+remove函数，clk_disable_unprepare
+
+```c
+clk_disable_unprepare(info->clk);
+```
