@@ -4,6 +4,7 @@
 #include <linux/io.h>
 #include <linux/interrupt.h>
 #include <linux/completion.h>
+#include <linux/clk.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -116,6 +117,7 @@ static const struct iio_chan_spec imx6ull_adc_iio_channels[] = {
 struct imx6ull_adc {
 	struct device *dev;
 	void __iomem *regs;
+	struct clk *clk;
 
 	u32 value;
 
@@ -208,6 +210,13 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	info->clk = devm_clk_get(&pdev->dev, "adc");
+	if (IS_ERR(info->clk)) {
+		dev_err(&pdev->dev, "failed getting clock, err = %ld\n",
+						PTR_ERR(info->clk));
+		return PTR_ERR(info->clk);
+	}
+
 	init_completion(&info->completion);
 
 	platform_set_drvdata(pdev, indio_dev);
@@ -225,6 +234,13 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
 	indio_dev->channels = imx6ull_adc_iio_channels;
 	indio_dev->num_channels = (int)channels;
 
+	ret = clk_prepare_enable(info->clk);
+	if (ret) {
+		dev_err(&pdev->dev,
+			"Could not prepare or enable the clock.\n");
+		goto fail_adc_clk_enable;
+	}
+
 	ret = iio_device_register(indio_dev);
 	if (ret) {
 		dev_err(&pdev->dev, "Couldn't register the device.\n");
@@ -233,8 +249,9 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
 
     printk(KERN_INFO "IMX6ULL ADC Driver Probed\n");
     return 0;
-	
+
 fail_iio_device_register:
+fail_adc_clk_enable:
 	return ret;
 }
 
@@ -244,6 +261,7 @@ static int imx6ull_adc_remove(struct platform_device *pdev)
 	struct imx6ull_adc *info = iio_priv(indio_dev);
 
 	iio_device_unregister(indio_dev);
+	clk_disable_unprepare(info->clk);
 
     printk(KERN_INFO "IMX6ULL ADC Driver Removed\n");
     return 0;
