@@ -110,6 +110,8 @@ struct imx6ull_adc_feature {
 	bool	ovwren;
 };
 
+static const u32 imx6ull_hw_avgs[] = { 1, 4, 8, 16, 32 };
+
 static const struct iio_chan_spec imx6ull_adc_iio_channels[] = {
 	IMX6ULL_ADC_CHAN(0, IIO_VOLTAGE),
 	IMX6ULL_ADC_CHAN(1, IIO_VOLTAGE),
@@ -123,11 +125,71 @@ struct imx6ull_adc {
 	u32 value;
 	u32 vref_uv;
 	struct regulator *vref;
+	
+	/* 不同平均次数对应的采样频率 */
+	u32 sample_freq_avail[5];
 
 	struct imx6ull_adc_feature adc_feature;
 	struct completion completion;
 	struct mutex lock;
 };
+
+static inline void imx6ull_adc_calculate_rates(struct imx6ull_adc *info)
+{
+	unsigned long adck_rate, ipg_rate = clk_get_rate(info->clk);
+	int i;
+
+	/* 
+     * 计算 ADC 时钟频率 (ADCK)
+     * ADCK = IPG时钟 / 分频系数
+     * 例如: IPG=66MHz, clk_div=8, 则 ADCK=8.25MHz
+     */
+	adck_rate = ipg_rate / info->adc_feature.clk_div;
+
+	/*
+     * 计算每种平均模式下的采样频率
+     * 公式: 采样频率 = ADCK / (基本转换时间 + 平均次数 × 单次转换时间)
+     * 
+	 * ADC conversion time = SFCAdder + AverageNum x (BCT + LSTAdder)
+	 * SFCAdder: fixed to 6 ADCK cycles
+	 * AverageNum: 1, 4, 8, 16, 32 samples for hardware average.
+	 * BCT (Base Conversion Time): fixed to 25 ADCK cycles for 12 bit mode
+	 * LSTAdder(Long Sample Time): fixed to 3 ADCK cycles
+	 * 
+     * 基本转换时间: 6个ADCK周期
+     * 单次转换时间: 25个ADCK周期 (采样) + 3个ADCK周期 (转换) = 28个周期
+     * 
+     * 例如:
+     * - 无平均(1次):   频率 = ADCK / (6 + 1×28)  = ADCK / 34
+     * - 4次平均:       频率 = ADCK / (6 + 4×28)  = ADCK / 118
+     * - 8次平均:       频率 = ADCK / (6 + 8×28)  = ADCK / 230
+     * - 16次平均:      频率 = ADCK / (6 + 16×28) = ADCK / 454
+     * - 32次平均:      频率 = ADCK / (6 + 32×28) = ADCK / 902
+     */
+	for (i = 0; i < ARRAY_SIZE(imx6ull_hw_avgs); i++)
+		info->sample_freq_avail[i] =
+			adck_rate / (6 + imx6ull_hw_avgs[i] * (25 + 3));
+}
+
+static inline void imx6ull_adc_cfg_init(struct imx6ull_adc *info)
+{
+	struct imx6ull_adc_feature *adc_feature = &info->adc_feature;
+
+	adc_feature->clk_sel = IMX6ULL_ADCIOC_BUSCLK_SET;
+	adc_feature->vol_ref = IMX6ULL_ADCIOC_VR_VREF_SET;	
+
+	adc_feature->calibration = true;
+	adc_feature->ovwren = true;
+
+	adc_feature->res_mode = 12;
+	adc_feature->sample_rate = 1;
+	adc_feature->lpm = true;
+
+	/* Use a save ADCK which is below 20MHz on all devices */
+	adc_feature->clk_div = 8;
+
+	imx6ull_adc_calculate_rates(info);
+}
 
 static int imx6ull_adc_read_data(struct imx6ull_adc *info)
 {
@@ -165,8 +227,69 @@ static irqreturn_t imx6ull_adc_isr(int irq, void *dev_id) {
 	return IRQ_HANDLED;
 }
 
+static int imx6ull_adc_read_raw(struct iio_dev *indio_dev,
+				struct iio_chan_spec const *chan,
+				int *val,
+				int *val2,
+				long mask)
+{
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+	long ret;
+	unsigned int hc_cfg;
+
+	switch(mask) {
+		case IIO_CHAN_INFO_RAW:
+			mutex_lock(&info->lock);
+			reinit_completion(&info->completion);
+
+			/*  Bit 7 AIEN 1 Conversion complete interrupt enabled.
+				Bit 4:0 ADCH 00001 Input channel 1 selected as ADC input channel */
+			hc_cfg = IMX6ULL_ADC_AIEN | IMX6ULL_ADC_ADCHC(chan->channel);
+			writel(hc_cfg, info->regs + IMX6ULL_REG_ADC_HC0);
+
+			ret = wait_for_completion_interruptible_timeout(&info->completion,
+                              IMX6ULL_ADC_TIMEOUT);
+            if (ret == 0) {
+                mutex_unlock(&info->lock);
+                return -ETIMEDOUT;
+            }
+			if (ret < 0) {
+				mutex_unlock(&info->lock);
+				return ret;
+			}
+
+			switch (chan->type) {
+				case IIO_VOLTAGE:
+					*val = info->value;
+					break;
+				default:
+					mutex_unlock(&info->lock);
+					return -EINVAL;
+			}
+
+			mutex_unlock(&info->lock);
+			return IIO_VAL_INT;
+		case IIO_CHAN_INFO_SCALE:
+		*val = info->vref_uv / 1000;
+		*val2 = info->adc_feature.res_mode;
+		return IIO_VAL_FRACTIONAL_LOG2;
+
+		case IIO_CHAN_INFO_SAMP_FREQ:
+			*val = info->sample_freq_avail[info->adc_feature.sample_rate];
+			*val2 = 0;
+			return IIO_VAL_INT;
+
+		default:
+			break;
+	}
+
+	return -EINVAL;
+}
+
 static const struct iio_info imx6ull_adc_iio_info = {
 	.driver_module = THIS_MODULE,
+	.read_raw = &imx6ull_adc_read_raw,
+	// .write_raw = &imx6ull_adc_write_raw,
 };
 
 static const struct of_device_id imx6ull_adc_match[] = {
@@ -253,6 +376,9 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
 			"Could not prepare or enable the clock.\n");
 		goto fail_adc_clk_enable;
 	}
+
+	imx6ull_adc_cfg_init(info);
+	// imx6ull_adc_hw_init(info);
 
 	ret = iio_device_register(indio_dev);
 	if (ret) {
