@@ -5,6 +5,7 @@
 #include <linux/interrupt.h>
 #include <linux/completion.h>
 #include <linux/clk.h>
+#include <linux/regulator/consumer.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -120,6 +121,8 @@ struct imx6ull_adc {
 	struct clk *clk;
 
 	u32 value;
+	u32 vref_uv;
+	struct regulator *vref;
 
 	struct imx6ull_adc_feature adc_feature;
 	struct completion completion;
@@ -217,6 +220,16 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
 		return PTR_ERR(info->clk);
 	}
 
+	info->vref = devm_regulator_get(&pdev->dev, "vref");
+	if (IS_ERR(info->vref))
+		return PTR_ERR(info->vref);
+
+	ret = regulator_enable(info->vref);
+	if (ret)
+		return ret;
+
+	info->vref_uv = regulator_get_voltage(info->vref);
+
 	init_completion(&info->completion);
 
 	platform_set_drvdata(pdev, indio_dev);
@@ -251,7 +264,9 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
     return 0;
 
 fail_iio_device_register:
+	clk_disable_unprepare(info->clk);
 fail_adc_clk_enable:
+	regulator_disable(info->vref);
 	return ret;
 }
 
@@ -262,6 +277,7 @@ static int imx6ull_adc_remove(struct platform_device *pdev)
 
 	iio_device_unregister(indio_dev);
 	clk_disable_unprepare(info->clk);
+	regulator_disable(info->vref);
 
     printk(KERN_INFO "IMX6ULL ADC Driver Removed\n");
     return 0;
