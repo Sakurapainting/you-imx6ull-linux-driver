@@ -876,3 +876,156 @@ fail_iio_device_register:
 fail_adc_clk_enable:
 	regulator_disable(info->vref);
 ```
+
+## iio_info read_raw
+
+wait_for_completion_interruptible_timeout 函数的返回值类型就是 long，所以需要本函数内的ret要是long 类型
+
+需要一个互斥锁：
+互斥锁保护了一个完整的 ADC 转换周期：
+
+- 配置硬件寄存器
+- 启动转换
+- 等待转换完成
+- 读取转换结果
+
+Bit 7 AIEN 1 Conversion complete interrupt enabled.
+Bit 4:0 ADCH 00001 Input channel 1 selected as ADC input channel
+
+手册上这么写，意味着
+
+- Bit 7 (AIEN): 设置为 1 启用转换完成中断
+- Bit 4:0 (ADCH): 设置通道号 (0-31)
+
+```c
+hc_cfg = IMX6ULL_ADC_AIEN | IMX6ULL_ADC_ADCHC(chan->channel);
+			writel(hc_cfg, info->regs + IMX6ULL_REG_ADC_HC0);
+```
+
+```c
+ret = wait_for_completion_interruptible_timeout(&info->completion,
+                              IMX6ULL_ADC_TIMEOUT);
+    if (ret == 0) {
+        mutex_unlock(&info->lock);
+        return -ETIMEDOUT;
+    }
+    if (ret < 0) {
+        mutex_unlock(&info->lock);
+        return ret;
+    }
+```
+
+为什么选择 interruptible？
+使用 wait_for_completion_interruptible_timeout 而不是不可中断版本的原因：
+
+- 响应性：允许用户随时取消长时间的ADC读取操作
+- 避免僵死进程：如果ADC硬件故障，用户可以强制终止进程
+- 符合Linux设计哲学：大部分驱动应该允许被信号中断
+
+```c
+switch (chan->type) {
+    case IIO_VOLTAGE:
+        *val = info->value;
+        break;
+    default:
+        mutex_unlock(&info->lock);
+        return -EINVAL;
+}
+```
+
+转换完成后，读取raw数据
+
+```c
+case IIO_CHAN_INFO_SCALE:
+    *val = info->vref_uv / 1000;
+    *val2 = info->adc_feature.res_mode;
+    return IIO_VAL_FRACTIONAL_LOG2;
+```
+
+实际电压 = ADC原始值 × scale
+scale = vref_uv / 1000 / 2^res_mode
+
+info->vref_uv = 3300000 (3.3V = 3300000 μV)
+info->adc_feature.res_mode = 12 (12位ADC)
+
+```c
+*val  = 3300000 / 1000 = 3300  // 转换为 mV
+*val2 = 12                      // 12位分辨率
+返回 IIO_VAL_FRACTIONAL_LOG2
+
+// IIO 框架会计算：
+scale = 3300 / 2^12 = 3300 / 4096 = 0.805664 mV/LSB
+```
+
+当驱动返回 IIO_VAL_FRACTIONAL_LOG2 时：
+
+实际值 = val / (2^val2)
+
+```c
+case IIO_CHAN_INFO_SAMP_FREQ:
+    *val = info->sample_freq_avail[info->adc_feature.sample_rate];
+    *val2 = 0;
+    return IIO_VAL_INT;  // 返回整数值
+```
+
+## adc cfg init
+
+```c
+static inline void imx6ull_adc_calculate_rates(struct imx6ull_adc *info)
+{
+	unsigned long adck_rate, ipg_rate = clk_get_rate(info->clk);
+	int i;
+
+	/* 
+     * 计算 ADC 时钟频率 (ADCK)
+     * ADCK = IPG时钟 / 分频系数
+     * 例如: IPG=66MHz, clk_div=8, 则 ADCK=8.25MHz
+     */
+	adck_rate = ipg_rate / info->adc_feature.clk_div;
+
+	/*
+     * 计算每种平均模式下的采样频率
+     * 公式: 采样频率 = ADCK / (基本转换时间 + 平均次数 × 单次转换时间)
+     * 
+	 * ADC conversion time = SFCAdder + AverageNum x (BCT + LSTAdder)
+	 * SFCAdder: fixed to 6 ADCK cycles
+	 * AverageNum: 1, 4, 8, 16, 32 samples for hardware average.
+	 * BCT (Base Conversion Time): fixed to 25 ADCK cycles for 12 bit mode
+	 * LSTAdder(Long Sample Time): fixed to 3 ADCK cycles
+	 * 
+     * 基本转换时间: 6个ADCK周期
+     * 单次转换时间: 25个ADCK周期 (采样) + 3个ADCK周期 (转换) = 28个周期
+     * 
+     * 例如:
+     * - 无平均(1次):   频率 = ADCK / (6 + 1×28)  = ADCK / 34
+     * - 4次平均:       频率 = ADCK / (6 + 4×28)  = ADCK / 118
+     * - 8次平均:       频率 = ADCK / (6 + 8×28)  = ADCK / 230
+     * - 16次平均:      频率 = ADCK / (6 + 16×28) = ADCK / 454
+     * - 32次平均:      频率 = ADCK / (6 + 32×28) = ADCK / 902
+     */
+	for (i = 0; i < ARRAY_SIZE(imx6ull_hw_avgs); i++)
+		info->sample_freq_avail[i] =
+			adck_rate / (6 + imx6ull_hw_avgs[i] * (25 + 3));
+}
+
+static inline void vf610_adc_cfg_init(struct vf610_adc *info)
+{
+	struct vf610_adc_feature *adc_feature = &info->adc_feature;
+
+	/* set default Configuration for ADC controller */
+	adc_feature->clk_sel = VF610_ADCIOC_BUSCLK_SET;
+	adc_feature->vol_ref = VF610_ADCIOC_VR_VREF_SET;
+
+	adc_feature->calibration = true;
+	adc_feature->ovwren = true;
+
+	adc_feature->res_mode = 12;
+	adc_feature->sample_rate = 1;
+	adc_feature->lpm = true;
+
+	/* Use a save ADCK which is below 20MHz on all devices */
+	adc_feature->clk_div = 8;
+
+	vf610_adc_calculate_rates(info);
+}
+```
