@@ -801,3 +801,78 @@ remove函数，clk_disable_unprepare
 ```c
 clk_disable_unprepare(info->clk);
 ```
+
+## 参考电压
+
+引入头文件：
+
+```c
+#include <linux/regulator/consumer.h>
+```
+
+向自定义结构体里添加
+
+```c
+u32 vref_uv;
+struct regulator *vref;
+```
+
+```c
+	info->vref = devm_regulator_get(&pdev->dev, "vref");
+	if (IS_ERR(info->vref))
+		return PTR_ERR(info->vref);
+
+	ret = regulator_enable(info->vref);
+	if (ret)
+		return ret;
+
+	info->vref_uv = regulator_get_voltage(info->vref);
+```
+
+命名匹配：devm_regulator_get(..., "vref") 自动查找 vref-supply
+引用正确：vref-supply = <&reg_vref_adc> 正确引用了调节器
+
+1. **获取电压调节器**
+````c
+info->vref = devm_regulator_get(&pdev->dev, "vref");
+if (IS_ERR(info->vref))
+    return PTR_ERR(info->vref);
+````
+
+- 从设备树中获取名为 `"vref"` 的电压调节器
+- `devm_regulator_get()` 是设备管理版本，设备销毁时自动释放
+- 如果获取失败，返回错误码
+
+2. **使能电压调节器**
+````c
+ret = regulator_enable(info->vref);
+if (ret)
+    return ret;
+````
+
+- 启动参考电压供应
+- 这会实际给 ADC 的 VREF 引脚供电
+- 如果使能失败，返回错误码
+
+3. **读取参考电压值**
+````c
+info->vref_uv = regulator_get_voltage(info->vref);
+````
+
+- 获取实际的参考电压值（单位：微伏 μV）
+- 这个值用于后续的 ADC 数值到实际电压的换算
+
+remove函数中：
+
+```c
+regulator_disable(info->vref);
+```
+
+probe goto部分：
+
+```c
+fail_iio_device_register:
+	clk_disable_unprepare(info->clk);
+fail_adc_clk_enable:
+	regulator_disable(info->vref);
+```
