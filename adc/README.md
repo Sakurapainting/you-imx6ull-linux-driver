@@ -1029,3 +1029,224 @@ static inline void vf610_adc_cfg_init(struct vf610_adc *info)
 	vf610_adc_calculate_rates(info);
 }
 ```
+
+## adc_hw_init
+
+```c
+static void imx6ull_adc_cfg_post_set(struct imx6ull_adc *info)
+{
+	struct imx6ull_adc_feature *adc_feature = &info->adc_feature;
+	int cfg_data = 0;
+	int gc_data = 0;
+
+	/* clock selection */
+	switch (adc_feature->clk_sel) {
+	case IMX6ULL_ADCIOC_ALTCLK_SET:
+		cfg_data |= IMX6ULL_ADC_ALTCLK_SEL;
+		break;
+	case IMX6ULL_ADCIOC_ADACK_SET:
+		cfg_data |= IMX6ULL_ADC_ADACK_SEL;
+		break;
+	default:
+		break;
+	}
+
+	/* low power set for calibration */
+	cfg_data |= IMX6ULL_ADC_ADLPC_EN;
+
+	/* enable high speed for calibration */
+	cfg_data |= IMX6ULL_ADC_ADHSC_EN;
+
+	/* voltage reference */
+	switch (adc_feature->vol_ref) {
+	case IMX6ULL_ADCIOC_VR_VREF_SET:
+		break;
+	case IMX6ULL_ADCIOC_VR_VALT_SET:
+		cfg_data |= IMX6ULL_ADC_REFSEL_VALT;
+		break;
+	case IMX6ULL_ADCIOC_VR_VBG_SET:
+		cfg_data |= IMX6ULL_ADC_REFSEL_VBG;
+		break;
+	default:
+		dev_err(info->dev, "error voltage reference\n");
+	}
+
+	/* data overwrite enable */
+	if (adc_feature->ovwren)
+		cfg_data |= IMX6ULL_ADC_OVWREN;
+
+	writel(cfg_data, info->regs + IMX6ULL_REG_ADC_CFG);
+	writel(gc_data, info->regs + IMX6ULL_REG_ADC_GC);
+}
+```
+
+1. 时钟源选择
+2. 低功耗模式 - 为校准启用
+3. 高速模式 - 为校准启用
+4. 参考电压源选择
+5. 数据覆写使能
+6. 写入寄存器
+
+```c
+static void imx6ull_adc_sample_set(struct imx6ull_adc *info)
+{
+	struct imx6ull_adc_feature *adc_feature = &(info->adc_feature);
+	int cfg_data, gc_data;
+
+	cfg_data = readl(info->regs + IMX6ULL_REG_ADC_CFG);
+	gc_data = readl(info->regs + IMX6ULL_REG_ADC_GC);
+
+	/* resolution mode */
+	cfg_data &= ~IMX6ULL_ADC_MODE_MASK;
+	switch (adc_feature->res_mode) {
+	case 8:
+		cfg_data |= IMX6ULL_ADC_MODE_BIT8;
+		break;
+	case 10:
+		cfg_data |= IMX6ULL_ADC_MODE_BIT10;
+		break;
+	case 12:
+		cfg_data |= IMX6ULL_ADC_MODE_BIT12;
+		break;
+	default:
+		dev_err(info->dev, "error resolution mode\n");
+		break;
+	}
+
+	/* clock select and clock divider */
+	cfg_data &= ~(IMX6ULL_ADC_CLK_MASK | IMX6ULL_ADC_ADCCLK_MASK);
+	switch (adc_feature->clk_div) {
+	case 1:
+		break;
+	case 2:
+		cfg_data |= IMX6ULL_ADC_CLK_DIV2;
+		break;
+	case 4:
+		cfg_data |= IMX6ULL_ADC_CLK_DIV4;
+		break;
+	case 8:
+		cfg_data |= IMX6ULL_ADC_CLK_DIV8;
+		break;
+	case 16:
+		switch (adc_feature->clk_sel) {
+		case IMX6ULL_ADCIOC_BUSCLK_SET:
+			cfg_data |= IMX6ULL_ADC_BUSCLK2_SEL | IMX6ULL_ADC_CLK_DIV8;
+			break;
+		default:
+			dev_err(info->dev, "error clk divider\n");
+			break;
+		}
+		break;
+	}
+
+	/* Use the short sample mode */
+	cfg_data &= ~(IMX6ULL_ADC_ADLSMP_LONG | IMX6ULL_ADC_ADSTS_MASK);
+
+	/* update hardware average selection */
+	cfg_data &= ~IMX6ULL_ADC_AVGS_MASK;
+	gc_data &= ~IMX6ULL_ADC_AVGEN;
+	switch (adc_feature->sample_rate) {
+	case IMX6ULL_ADC_SAMPLE_1:
+		break;
+	case IMX6ULL_ADC_SAMPLE_4:
+		gc_data |= IMX6ULL_ADC_AVGEN;
+		break;
+	case IMX6ULL_ADC_SAMPLE_8:
+		gc_data |= IMX6ULL_ADC_AVGEN;
+		cfg_data |= IMX6ULL_ADC_AVGS_8;
+		break;
+	case IMX6ULL_ADC_SAMPLE_16:
+		gc_data |= IMX6ULL_ADC_AVGEN;
+		cfg_data |= IMX6ULL_ADC_AVGS_16;
+		break;
+	case IMX6ULL_ADC_SAMPLE_32:
+		gc_data |= IMX6ULL_ADC_AVGEN;
+		cfg_data |= IMX6ULL_ADC_AVGS_32;
+		break;
+	default:
+		dev_err(info->dev,
+			"error hardware sample average select\n");
+	}
+
+	writel(cfg_data, info->regs + IMX6ULL_REG_ADC_CFG);
+	writel(gc_data, info->regs + IMX6ULL_REG_ADC_GC);
+}
+```
+
+1. 读取当前寄存器值
+2. 分辨率模式配置
+3. 时钟分频配置（16分频有特殊处理）
+4. 采样模式配置 - 使用短采样模式（清除长采样和采样时间设置）
+5. 硬件平均配置 - GC[5] (AVGEN): 总开关，控制是否启用硬件平均;CFG[15:14] (AVGS): 选择平均次数 (4/8/16/32)
+
+```c
+static void imx6ull_adc_calibration(struct imx6ull_adc *info)
+{
+	int adc_gc, hc_cfg;
+
+    if (!info->adc_feature.calibration)
+		return;
+
+	/* enable calibration interrupt */
+	hc_cfg = IMX6ULL_ADC_AIEN | IMX6ULL_ADC_CONV_DISABLE;
+	writel(hc_cfg, info->regs + IMX6ULL_REG_ADC_HC0);
+
+	adc_gc = readl(info->regs + IMX6ULL_REG_ADC_GC);
+	writel(adc_gc | IMX6ULL_ADC_CAL, info->regs + IMX6ULL_REG_ADC_GC);
+
+	if (!wait_for_completion_timeout(&info->completion, IMX6ULL_ADC_TIMEOUT))
+		dev_err(info->dev, "Timeout for adc calibration\n");
+
+	adc_gc = readl(info->regs + IMX6ULL_REG_ADC_GS);
+	if (adc_gc & IMX6ULL_ADC_CALF)
+		dev_err(info->dev, "ADC calibration failed\n");
+
+	info->adc_feature.calibration = false;
+}
+```
+
+1. 检查是否需要校准（vf610例程有，但是可能有问题。原因：adc开机后可能需要不止启动后的那一次校准，可能休眠后唤醒还需要校准。若检查校准则会使启动后只执行一次校准）
+2. 配置硬件控制寄存器 - 使能校准中断
+3. 启动校准过程
+4. 等待校准完成（最多100ms）
+5. 检查校准结果
+6. 标记校准已完成
+
+```c
+static void imx6ull_adc_cfg_set(struct imx6ull_adc *info)
+{
+	struct imx6ull_adc_feature *adc_feature = &(info->adc_feature);
+	int cfg_data;
+
+	cfg_data = readl(info->regs + IMX6ULL_REG_ADC_CFG);
+
+	cfg_data &= ~IMX6ULL_ADC_ADLPC_EN;
+	if (adc_feature->lpm)
+		cfg_data |= IMX6ULL_ADC_ADLPC_EN;
+
+	cfg_data &= ~IMX6ULL_ADC_ADHSC_EN;
+
+	writel(cfg_data, info->regs + IMX6ULL_REG_ADC_CFG);
+}
+```
+
+是在 ADC 校准完成后 调整电源和速度配置的函数，主要负责关闭校准时的高速模式，并根据需要配置低功耗模式
+
+1. 读取当前 CFG 寄存器值
+2. 配置低功耗模式
+3. 禁用高速模式（校准专用）
+4. 写回寄存器
+
+```c
+static void imx6ull_adc_hw_init(struct imx6ull_adc *info) {
+	/* CFG: Feature set */
+	imx6ull_adc_cfg_post_set(info);
+	imx6ull_adc_sample_set(info);
+
+	/* adc calibration */
+	imx6ull_adc_calibration(info);
+
+	/* final CFG: low power and disable high speed */
+	imx6ull_adc_cfg_set(info);
+}
+```
