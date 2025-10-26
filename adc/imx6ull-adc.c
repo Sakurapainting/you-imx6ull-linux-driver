@@ -613,6 +613,8 @@ static int imx6ull_adc_probe(struct platform_device *pdev)
 
 	info->vref_uv = regulator_get_voltage(info->vref);
 
+	mutex_init(&info->lock);
+	
 	init_completion(&info->completion);
 
 	platform_set_drvdata(pdev, indio_dev);
