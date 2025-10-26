@@ -1434,3 +1434,17 @@ static const struct iio_info imx6ull_adc_iio_info = {
     .attrs = &imx6ull_attribute_group,  /* 关键：注册属性组 */
 };
 ```
+
+## fix 缺少mutex init
+
+```c
+    info->vref_uv = regulator_get_voltage(info->vref);
+
+    mutex_init(&info->lock); // 添加
+
+    init_completion(&info->completion);
+
+    platform_set_drvdata(pdev, indio_dev);
+```
+
+由于mutex用的是自定义结构体里自己定义的lock，而不是内核自带的mlock，所以需要自己初始化。
