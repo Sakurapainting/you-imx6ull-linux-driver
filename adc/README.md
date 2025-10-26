@@ -1448,3 +1448,177 @@ static const struct iio_info imx6ull_adc_iio_info = {
 ```
 
 由于mutex用的是自定义结构体里自己定义的lock，而不是内核自带的mlock，所以需要自己初始化。
+
+## 电源管理PM
+
+platform_driver中加入 .pm 函数配置
+
+```c
+static struct platform_driver imx6ull_adc_driver = {
+	.probe          = imx6ull_adc_probe,
+	.remove         = imx6ull_adc_remove,
+	.driver         = {
+		.name   = IMX6ULL_ADC_NAME,
+		.of_match_table = imx6ull_adc_match,
+		.pm     = &imx6ull_adc_pm_ops,
+	},
+};
+```
+
+```c
+#ifdef CONFIG_PM_SLEEP
+static int imx6ull_adc_suspend(struct device *dev)
+{
+	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+	int hc_cfg;
+
+	/* ADC controller enters to stop mode */
+	hc_cfg = readl(info->regs + IMX6ULL_REG_ADC_HC0);
+	hc_cfg |= IMX6ULL_ADC_CONV_DISABLE;
+	writel(hc_cfg, info->regs + IMX6ULL_REG_ADC_HC0);
+
+	clk_disable_unprepare(info->clk);
+	regulator_disable(info->vref);
+
+	return 0;
+}
+
+static int imx6ull_adc_resume(struct device *dev)
+{
+	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+	int ret;
+
+	ret = regulator_enable(info->vref);
+	if (ret)
+		return ret;
+
+	ret = clk_prepare_enable(info->clk);
+	if (ret)
+		goto disable_reg;
+
+	imx6ull_adc_hw_init(info);
+
+	return 0;
+
+disable_reg:
+	regulator_disable(info->vref);
+	return ret;
+}
+#endif
+```
+
+```c
+static SIMPLE_DEV_PM_OPS(imx6ull_adc_pm_ops, imx6ull_adc_suspend, imx6ull_adc_resume);
+```
+
+SIMPLE_DEV_PM_OPS 是一个宏,展开后会创建一个 struct dev_pm_ops 结构体:
+
+```c
+// 宏展开后等价于:
+static const struct dev_pm_ops imx6ull_adc_pm_ops = {
+    .suspend = imx6ull_adc_suspend,    // 系统挂起时调用
+    .resume = imx6ull_adc_resume,      // 系统恢复时调用
+    .freeze = imx6ull_adc_suspend,     // 休眠(hibernate)冻结时调用
+    .thaw = imx6ull_adc_resume,        // 休眠解冻时调用
+    .poweroff = imx6ull_adc_suspend,   // 关机前调用
+    .restore = imx6ull_adc_resume,     // 休眠恢复时调用
+};
+```
+
+挂起的状态保存在内存，休眠的状态保存在硬盘/闪存
+
+linux电源管理状态大致：
+
+```
+                    运行态
+                      │
+          ┌───────────┼───────────┐
+          │                       │
+        Suspend                Hibernate
+          │                       │
+    ┌─────▼─────┐           ┌─────▼─────┐
+    │ RAM 供电  │           │写入磁盘后 │
+    │其他关闭   │           │  完全断电  │
+    │(Suspend)  │           │(Hibernate)│
+    └─────┬─────┘           └─────┬─────┘
+          │                       │
+        唤醒信号              开机引导检测
+          │                       │
+          └───────────┬───────────┘
+                      │
+                    恢复态
+```
+
+```c
+static int imx6ull_adc_suspend(struct device *dev)
+{
+    struct iio_dev *indio_dev = dev_get_drvdata(dev);
+    struct imx6ull_adc *info = iio_priv(indio_dev);
+    int hc_cfg;
+
+    /* 1. 停止 ADC 转换 */
+    hc_cfg = readl(info->regs + IMX6ULL_REG_ADC_HC0);
+    hc_cfg |= IMX6ULL_ADC_CONV_DISABLE;
+    writel(hc_cfg, info->regs + IMX6ULL_REG_ADC_HC0);
+
+    /* 2. 关闭时钟,节省功耗 */
+    clk_disable_unprepare(info->clk);
+    
+    /* 3. 关闭电压基准,进一步降低功耗 */
+    regulator_disable(info->vref);
+
+    return 0;
+}
+```
+
+- 停止 ADC 工作 - 设置 CONV_DISABLE 位,确保没有正在进行的转换
+- 关闭时钟 - 停止 ADC 时钟,降低动态功耗
+- 关闭电源 - 关闭参考电压,降低静态功耗
+
+```c
+static int imx6ull_adc_resume(struct device *dev)
+{
+    struct iio_dev *indio_dev = dev_get_drvdata(dev);
+    struct imx6ull_adc *info = iio_priv(indio_dev);
+    int ret;
+
+    /* 1. 恢复电压基准 */
+    ret = regulator_enable(info->vref);
+    if (ret)
+        return ret;
+
+    /* 2. 恢复时钟 */
+    ret = clk_prepare_enable(info->clk);
+    if (ret)
+        goto disable_reg;
+
+    /* 3. 重新初始化硬件 */
+    imx6ull_adc_hw_init(info);
+
+    return 0;
+
+disable_reg:
+    regulator_disable(info->vref);
+    return ret;
+}
+```
+
+- 恢复电源 - 使能参考电压,等待稳定
+- 恢复时钟 - 使能并准备 ADC 时钟
+- 重新初始化 - 调用 imx6ull_adc_hw_init() 恢复寄存器配置
+
+```
+系统休眠                     系统唤醒
+   ↓                           ↓
+suspend()                   resume()
+   ↓                           ↓
+停止ADC转换                 打开电压基准
+   ↓                           ↓
+关闭时钟                    打开时钟
+   ↓                           ↓
+关闭电压基准                 重新初始化ADC
+   ↓                           ↓
+低功耗状态                  正常工作状态
+```
