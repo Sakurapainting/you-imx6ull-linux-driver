@@ -1250,3 +1250,187 @@ static void imx6ull_adc_hw_init(struct imx6ull_adc *info) {
 	imx6ull_adc_cfg_set(info);
 }
 ```
+
+## iio_info write_raw
+
+```c
+static int imx6ull_adc_write_raw(struct iio_dev *indio_dev,
+			struct iio_chan_spec const *chan,
+			int val,
+			int val2,
+			long mask)
+{
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+	int i;
+
+	switch (mask) {
+		case IIO_CHAN_INFO_SAMP_FREQ:
+			for (i = 0;
+				i < ARRAY_SIZE(info->sample_freq_avail);
+				i++)
+				if (val == info->sample_freq_avail[i]) {
+					info->adc_feature.sample_rate = i;
+					imx6ull_adc_sample_set(info);
+					return 0;
+				}
+			break;
+
+		default:
+			break;
+	}
+
+	return -EINVAL;
+}
+```
+
+采样率传进write_raw函数之后，sample_set需要整个重新设置才能应用采样率
+
+## iio_info debugfs_reg_access
+
+```c
+static int imx6ull_adc_reg_access(struct iio_dev *indio_dev,
+			unsigned reg, unsigned writeval,
+			unsigned *readval)
+{
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+
+	if ((readval == NULL) ||
+		(!(reg % 4) || (reg > IMX6ULL_REG_ADC_CAL)))
+		return -EINVAL;
+
+	*readval = readl(info->regs + reg);
+
+	return 0;
+}
+```
+
+```bash
+# 直接读取硬件寄存器 - 调试使用
+cat /sys/kernel/debug/iio/iio:device0/direct_reg_access
+
+# 可以查看内部寄存器状态
+echo 0x14 > /sys/kernel/debug/iio/iio:device0/direct_reg_access  # 读取 CFG 寄存器
+cat /sys/kernel/debug/iio/iio:device0/direct_reg_access
+```
+
+## iio_info attr
+
+标准 IIO 属性（自动创建）
+IIO 框架会根据 iio_chan_spec 自动创建这些 sysfs 文件：
+
+```bash
+# 这些是 IIO 框架自动创建的
+in_voltage0_raw        # 读取通道 0 的原始值
+in_voltage1_raw        # 读取通道 1 的原始值
+in_voltage_scale       # 缩放因子
+sampling_frequency     # 当前采样频率
+```
+
+自定义属性（需要 attribute_group）
+这些需要驱动手动添加：
+
+```bash
+# 需要通过 attribute_group 添加
+sampling_frequency_available  # 显示所有支持的采样频率
+```
+
+```bash
+# 1. 查看支持的采样频率
+cat /sys/bus/iio/devices/iio:device0/sampling_frequency_available
+# 1041 800 727 572 500
+
+# 2. 查看当前采样频率
+cat /sys/bus/iio/devices/iio:device0/sampling_frequency
+# 1041
+
+# 3. 修改采样频率（从 available 列表中选择）
+echo 800 > /sys/bus/iio/devices/iio:device0/sampling_frequency
+
+# 4. 验证修改
+cat /sys/bus/iio/devices/iio:device0/sampling_frequency
+# 800
+
+# 5. 读取 ADC 值（使用新的采样频率）
+cat /sys/bus/iio/devices/iio:device0/in_voltage1_raw
+# 1063
+```
+
+```c
+/* 
+ * 显示所有可用的采样频率
+ * 当用户读取 sysfs 文件时调用此函数
+ */
+static ssize_t imx6ull_show_samp_freq_avail(struct device *dev,
+                struct device_attribute *attr, char *buf)
+{
+    /* 从 device 获取 iio_dev，再获取私有数据 */
+    struct imx6ull_adc *info = iio_priv(dev_to_iio_dev(dev));
+    size_t len = 0;
+    int i;
+
+    /* 遍历所有可用的采样频率，格式化输出到 buf */
+    for (i = 0; i < ARRAY_SIZE(info->sample_freq_avail); i++)
+        len += scnprintf(buf + len, PAGE_SIZE - len,
+            "%u ", info->sample_freq_avail[i]);
+
+    /* 将末尾的空格替换为换行符 */
+    buf[len - 1] = '\n';
+
+    return len;
+}
+```
+
+```c
+/* 
+ * IIO_DEV_ATTR_SAMP_FREQ_AVAIL 是 IIO 框架提供的宏
+ * 展开后创建一个名为 iio_dev_attr_sampling_frequency_available 的结构
+ */
+static IIO_DEV_ATTR_SAMP_FREQ_AVAIL(imx6ull_show_samp_freq_avail);
+
+/* 宏展开后大致等价于: */
+/*
+static struct device_attribute iio_dev_attr_sampling_frequency_available = {
+    .attr = {
+        .name = "sampling_frequency_available",
+        .mode = 0444,  // 只读权限
+    },
+    .show = imx6ull_show_samp_freq_avail,
+    .store = NULL,
+};
+*/
+```
+
+```c
+/* 
+ * 将所有要导出的属性放入数组
+ * 以 NULL 结尾表示数组结束
+ */
+static struct attribute *imx6ull_attributes[] = {
+    &iio_dev_attr_sampling_frequency_available.dev_attr.attr,
+    NULL  /* 哨兵元素 */
+};
+```
+
+```c
+/* 
+ * 将属性数组封装成属性组
+ * 属性组可以包含多个相关的属性
+ */
+static const struct attribute_group imx6ull_attribute_group = {
+    .attrs = imx6ull_attributes,
+};
+```
+
+```c
+/* 
+ * 将属性组注册到 IIO info 结构
+ * IIO 框架会自动创建 sysfs 文件
+ */
+static const struct iio_info imx6ull_adc_iio_info = {
+    .driver_module = THIS_MODULE,
+    .read_raw = &imx6ull_adc_read_raw,
+    .write_raw = &imx6ull_adc_write_raw,
+    .debugfs_reg_access = &imx6ull_adc_reg_access,
+    .attrs = &imx6ull_attribute_group,  /* 关键：注册属性组 */
+};
+```
