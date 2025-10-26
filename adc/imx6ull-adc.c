@@ -468,10 +468,88 @@ static int imx6ull_adc_read_raw(struct iio_dev *indio_dev,
 	return -EINVAL;
 }
 
+static int imx6ull_adc_write_raw(struct iio_dev *indio_dev,
+			struct iio_chan_spec const *chan,
+			int val,
+			int val2,
+			long mask)
+{
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+	int i;
+
+	switch (mask) {
+		case IIO_CHAN_INFO_SAMP_FREQ:
+			for (i = 0;
+				i < ARRAY_SIZE(info->sample_freq_avail);
+				i++)
+				if (val == info->sample_freq_avail[i]) {
+					info->adc_feature.sample_rate = i;
+					imx6ull_adc_sample_set(info);
+					return 0;
+				}
+			break;
+
+		default:
+			break;
+	}
+
+	return -EINVAL;
+}
+
+static int imx6ull_adc_reg_access(struct iio_dev *indio_dev,
+			unsigned reg, unsigned writeval,
+			unsigned *readval)
+{
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+
+	if ((readval == NULL) ||
+		(!(reg % 4) || (reg > IMX6ULL_REG_ADC_CAL)))
+		return -EINVAL;
+
+	*readval = readl(info->regs + reg);
+
+	return 0;
+}
+
+
+/* 
+ * 显示所有可用的采样频率
+ * 当用户读取 sysfs 文件时调用此函数
+ */
+static ssize_t imx6ull_show_samp_freq_avail(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct imx6ull_adc *info = iio_priv(dev_to_iio_dev(dev));
+	size_t len = 0;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(info->sample_freq_avail); i++)
+		len += scnprintf(buf + len, PAGE_SIZE - len,
+			"%u ", info->sample_freq_avail[i]);
+
+	/* replace trailing space by newline */
+	buf[len - 1] = '\n';
+
+	return len;
+}
+
+static IIO_DEV_ATTR_SAMP_FREQ_AVAIL(imx6ull_show_samp_freq_avail);
+
+static struct attribute *imx6ull_attributes[] = {
+	&iio_dev_attr_sampling_frequency_available.dev_attr.attr,
+	NULL
+};
+
+static const struct attribute_group imx6ull_attribute_group = {
+	.attrs = imx6ull_attributes,
+};
+
 static const struct iio_info imx6ull_adc_iio_info = {
 	.driver_module = THIS_MODULE,
 	.read_raw = &imx6ull_adc_read_raw,
-	// .write_raw = &imx6ull_adc_write_raw,
+	.write_raw = &imx6ull_adc_write_raw,
+	.debugfs_reg_access = &imx6ull_adc_reg_access,
+	.attrs = &imx6ull_attribute_group,
 };
 
 static const struct of_device_id imx6ull_adc_match[] = {
