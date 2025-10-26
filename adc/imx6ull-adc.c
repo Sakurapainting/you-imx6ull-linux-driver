@@ -671,13 +671,57 @@ static int imx6ull_adc_remove(struct platform_device *pdev)
     return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int imx6ull_adc_suspend(struct device *dev)
+{
+	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+	int hc_cfg;
+
+	/* ADC controller enters to stop mode */
+	hc_cfg = readl(info->regs + IMX6ULL_REG_ADC_HC0);
+	hc_cfg |= IMX6ULL_ADC_CONV_DISABLE;
+	writel(hc_cfg, info->regs + IMX6ULL_REG_ADC_HC0);
+
+	clk_disable_unprepare(info->clk);
+	regulator_disable(info->vref);
+
+	return 0;
+}
+
+static int imx6ull_adc_resume(struct device *dev)
+{
+	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+	struct imx6ull_adc *info = iio_priv(indio_dev);
+	int ret;
+
+	ret = regulator_enable(info->vref);
+	if (ret)
+		return ret;
+
+	ret = clk_prepare_enable(info->clk);
+	if (ret)
+		goto disable_reg;
+
+	imx6ull_adc_hw_init(info);
+
+	return 0;
+
+disable_reg:
+	regulator_disable(info->vref);
+	return ret;
+}
+#endif
+
+static SIMPLE_DEV_PM_OPS(imx6ull_adc_pm_ops, imx6ull_adc_suspend, imx6ull_adc_resume);
+
 static struct platform_driver imx6ull_adc_driver = {
 	.probe          = imx6ull_adc_probe,
 	.remove         = imx6ull_adc_remove,
 	.driver         = {
 		.name   = IMX6ULL_ADC_NAME,
 		.of_match_table = imx6ull_adc_match,
-		// .pm     = &imx6ull_adc_pm_ops,
+		.pm     = &imx6ull_adc_pm_ops,
 	},
 };
 
