@@ -32,12 +32,14 @@ you-imx6ull-linux-driver/
 ├── xxx.sh                       # 内核文件同步等管理脚本
 ├── README.md                    # 项目说明文档
 ├── LICENSE                      # 许可证文件
-├── xx_driver/         
-│   ├── xxx.c                    # 驱动源码
-│   ├── xx_driver.dts            # 设备树片段（示例）
-│   ├── xxxAPP.c                 # 测试应用
-│   ├── README.md                
-│   └── Makefile                 
+├── you-drivers-examples/
+│   ├── xx_driver/         
+│       ├── xxx.c                # 驱动源码
+│       ├── xx_driver.dts        # 设备树片段（示例）
+│       ├── xxxAPP.c             # 测试应用
+│       ├── README.md                
+│       └── Makefile        
+├── drivers/                     # 对应内核文件中的目录……下级目录省略        
 ```
 
 ## 使用方法
