@@ -36,6 +36,7 @@ you-imx6ull-linux-driver/
 │   ├── xx_driver/         
 │       ├── xxx.c                # 驱动源码
 │       ├── xx_driver.dts        # 设备树片段（示例）
+│       ├── Kconfig              # Kconfig片段（示例）
 │       ├── xxxAPP.c             # 测试应用
 │       ├── README.md                
 │       └── Makefile        
