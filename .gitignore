@@ -23,5 +23,6 @@
 !Makefile
 !zImage
 !LICENSE
+!Kconfig
 
 !*.pdf
