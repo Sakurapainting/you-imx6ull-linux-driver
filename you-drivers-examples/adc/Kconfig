@@ -1,0 +1,10 @@
+# drivers/iio/adc/
+
+config IMX6ULL_ADC
+	tristate "SakoroYou IMX6ULL ADC driver"
+	depends on OF
+	help
+	  The driver written by SakoroYou support I.MX6ULL.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called imx6ull-adc.
